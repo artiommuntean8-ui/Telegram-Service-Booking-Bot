@@ -1,17 +1,19 @@
 import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 import aiosqlite
 
 TOKEN = "YOUR_BOT_TOKEN"
+ADMIN_ID = 123456789  # твой Telegram ID
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Определяем состояния
+# FSM состояния
 class Booking(StatesGroup):
-    name = State()
     date = State()
     time = State()
 
@@ -28,41 +30,95 @@ async def init_db():
         """)
         await db.commit()
 
+# Старт
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("Привет! Напиши /book чтобы записаться.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Записаться", callback_data="book")],
+        [InlineKeyboardButton(text="Мои записи", callback_data="my_records")]
+    ])
+    await message.answer("Привет! Я бот для записи на услуги.", reply_markup=kb)
 
-@dp.message(Command("book"))
-async def book(message: types.Message, state: FSMContext):
-    await message.answer("Введите ваше имя:")
-    await state.set_state(Booking.name)
+# Кнопки
+@dp.callback_query()
+async def callbacks(callback: types.CallbackQuery, state: FSMContext):
+    if callback.data == "book":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="2025-12-31", callback_data="date:2025-12-31")],
+            [InlineKeyboardButton(text="2026-01-01", callback_data="date:2026-01-01")]
+        ])
+        await callback.message.answer("Выберите дату:", reply_markup=kb)
+        await state.set_state(Booking.date)
 
-@dp.message(Booking.name)
-async def get_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await message.answer("Введите дату (например: 2025-12-31):")
-    await state.set_state(Booking.date)
+    elif callback.data.startswith("date:"):
+        date = callback.data.split(":")[1]
+        await state.update_data(date=date)
 
-@dp.message(Booking.date)
-async def get_date(message: types.Message, state: FSMContext):
-    await state.update_data(date=message.text)
-    await message.answer("Введите время (например: 15:00):")
-    await state.set_state(Booking.time)
+        # Проверяем занятость слотов
+        async with aiosqlite.connect("appointments.db") as db:
+            times = ["10:00", "12:00", "15:00"]
+            kb = InlineKeyboardMarkup(inline_keyboard=[])
+            for t in times:
+                cursor = await db.execute("SELECT * FROM appointments WHERE date=? AND time=?", (date, t))
+                busy = await cursor.fetchone()
+                if busy:
+                    kb.inline_keyboard.append([InlineKeyboardButton(text=f"{t} ❌", callback_data="busy")])
+                else:
+                    kb.inline_keyboard.append([InlineKeyboardButton(text=t, callback_data=f"time:{t}")])
+        await callback.message.answer(f"Вы выбрали дату {date}. Теперь выберите время:", reply_markup=kb)
+        await state.set_state(Booking.time)
 
-@dp.message(Booking.time)
-async def get_time(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    name = data["name"]
-    date = data["date"]
-    time = message.text
+    elif callback.data.startswith("time:"):
+        time = callback.data.split(":")[1]
+        data = await state.get_data()
+        date = data["date"]
 
-    async with aiosqlite.connect("appointments.db") as db:
-        await db.execute("INSERT INTO appointments (user_id, name, date, time) VALUES (?, ?, ?, ?)",
-                         (message.from_user.id, name, date, time))
-        await db.commit()
+        async with aiosqlite.connect("appointments.db") as db:
+            await db.execute("INSERT INTO appointments (user_id, name, date, time) VALUES (?, ?, ?, ?)",
+                             (callback.from_user.id, callback.from_user.full_name, date, time))
+            await db.commit()
 
-    await message.answer(f"✅ Запись создана!\nИмя: {name}\nДата: {date}\nВремя: {time}")
-    await state.clear()
+        await callback.message.answer(f"✅ Запись создана!\nДата: {date}\nВремя: {time}")
+        await state.clear()
+
+    elif callback.data == "my_records":
+        async with aiosqlite.connect("appointments.db") as db:
+            cursor = await db.execute("SELECT date, time FROM appointments WHERE user_id=?", (callback.from_user.id,))
+            records = await cursor.fetchall()
+        if records:
+            text = "\n".join([f"{d} {t}" for d, t in records])
+            await callback.message.answer(f"Ваши записи:\n{text}")
+        else:
+            await callback.message.answer("У вас пока нет записей.")
+
+# Админ‑панель
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        async with aiosqlite.connect("appointments.db") as db:
+            cursor = await db.execute("SELECT id, name, date, time FROM appointments")
+            records = await cursor.fetchall()
+        if records:
+            text = "\n".join([f"{rid}. {n} — {d} {t}" for rid, n, d, t in records])
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"Удалить запись {rid}", callback_data=f"del:{rid}")]
+                for rid, _, _, _ in records
+            ])
+            await message.answer(f"📋 Все записи:\n{text}", reply_markup=kb)
+        else:
+            await message.answer("Записей пока нет.")
+    else:
+        await message.answer("⛔ У вас нет доступа к админ‑панели.")
+
+# Удаление записи
+@dp.callback_query()
+async def admin_delete(callback: types.CallbackQuery):
+    if callback.data.startswith("del:") and callback.from_user.id == ADMIN_ID:
+        rid = int(callback.data.split(":")[1])
+        async with aiosqlite.connect("appointments.db") as db:
+            await db.execute("DELETE FROM appointments WHERE id=?", (rid,))
+            await db.commit()
+        await callback.message.answer(f"🗑 Запись {rid} удалена.")
 
 async def main():
     await init_db()
