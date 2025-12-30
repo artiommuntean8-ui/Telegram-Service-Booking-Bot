@@ -6,7 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 import aiosqlite
 
-TOKEN = "YOUR_BOT_TOKEN"
+TOKEN = "8045823678:AAEjw2gvzK7PfrPpgKB_KWyNQKjgH99CBZU"
 ADMIN_ID = 123456789  # твой Telegram ID
 
 bot = Bot(token=TOKEN)
